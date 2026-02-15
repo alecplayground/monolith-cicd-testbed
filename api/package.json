@@ -1,0 +1,13 @@
+{
+  "name": "monolith-cicd-testbed",
+  "version": "0.0.1",
+  "private": true,
+  "description": "CI/CD pipeline test stub for Monolith API",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "sharp": "^0.33.4"
+  }
+}

@@ -1,0 +1,135 @@
+# Dev Environment Compose
+# Mirrors production structure with fewer replicas.
+#
+# Named services preserved per current architecture.
+# 5 app instances + 1 bull worker + 1 migrator
+
+version: '3.8'
+name: degenapi_dev
+
+services:
+  redis:
+    container_name: degenapi_redis_dev
+    restart: unless-stopped
+    image: redis:6-alpine
+    volumes:
+      - redis_dev_volume:/data
+    ports:
+      - 16379:6379
+
+  traefik:
+    image: traefik:v2.9
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      - '--api.insecure=true'
+      - '--providers.docker=true'
+      - '--providers.docker.exposedByDefault=false'
+      - '--entrypoints.api.address=:3333'
+    ports:
+      - '80:80'
+      - '3333:3333'
+      - '8080:8080'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  adonis_app_migrator:
+    image: ghcr.io/alecplayground/monolith-cicd-testbed:${IMAGE_TAG:-dev}
+    container_name: adonis_app_migrator
+    env_file: ~/.env
+    # In real app: node ace migration:run --force && node ace db:seed
+    command: ['dumb-init', 'node', '-e', 'console.log("migrations complete")']
+
+  adonis_app_bull:
+    image: ghcr.io/alecplayground/monolith-cicd-testbed:${IMAGE_TAG:-dev}
+    container_name: adonis_app_bull
+    restart: unless-stopped
+    env_file: ~/.env
+    depends_on:
+      - redis
+      - adonis_app_migrator
+    # In real app: node ace bull:listen
+    command: ['dumb-init', 'node', 'server.js']
+
+  adonis_app:
+    image: ghcr.io/alecplayground/monolith-cicd-testbed:${IMAGE_TAG:-dev}
+    restart: unless-stopped
+    env_file: ~/.env
+    depends_on:
+      - adonis_app_migrator
+      - traefik
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.api.rule=PathPrefix(`/`)'
+      - 'traefik.http.routers.api.entrypoints=api'
+      - 'traefik.http.services.api.loadbalancer.server.port=3333'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.path=/commit'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.interval=15s'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.timeout=5s'
+
+  adonis_app_two:
+    image: ghcr.io/alecplayground/monolith-cicd-testbed:${IMAGE_TAG:-dev}
+    restart: unless-stopped
+    env_file: ~/.env
+    depends_on:
+      - adonis_app_migrator
+      - traefik
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.api.rule=PathPrefix(`/`)'
+      - 'traefik.http.routers.api.entrypoints=api'
+      - 'traefik.http.services.api.loadbalancer.server.port=3333'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.path=/commit'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.interval=15s'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.timeout=5s'
+
+  adonis_app_three:
+    image: ghcr.io/alecplayground/monolith-cicd-testbed:${IMAGE_TAG:-dev}
+    restart: unless-stopped
+    env_file: ~/.env
+    depends_on:
+      - adonis_app_migrator
+      - traefik
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.api.rule=PathPrefix(`/`)'
+      - 'traefik.http.routers.api.entrypoints=api'
+      - 'traefik.http.services.api.loadbalancer.server.port=3333'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.path=/commit'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.interval=15s'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.timeout=5s'
+
+  adonis_app_four:
+    image: ghcr.io/alecplayground/monolith-cicd-testbed:${IMAGE_TAG:-dev}
+    restart: unless-stopped
+    env_file: ~/.env
+    depends_on:
+      - adonis_app_migrator
+      - traefik
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.api.rule=PathPrefix(`/`)'
+      - 'traefik.http.routers.api.entrypoints=api'
+      - 'traefik.http.services.api.loadbalancer.server.port=3333'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.path=/commit'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.interval=15s'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.timeout=5s'
+
+  adonis_app_five:
+    image: ghcr.io/alecplayground/monolith-cicd-testbed:${IMAGE_TAG:-dev}
+    restart: unless-stopped
+    env_file: ~/.env
+    depends_on:
+      - adonis_app_migrator
+      - traefik
+    labels:
+      - 'traefik.enable=true'
+      - 'traefik.http.routers.api.rule=PathPrefix(`/`)'
+      - 'traefik.http.routers.api.entrypoints=api'
+      - 'traefik.http.services.api.loadbalancer.server.port=3333'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.path=/commit'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.interval=15s'
+      - 'traefik.http.services.api.loadbalancer.healthCheck.timeout=5s'
+
+volumes:
+  redis_dev_volume:

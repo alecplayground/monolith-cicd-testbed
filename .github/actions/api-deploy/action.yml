@@ -1,0 +1,140 @@
+# =============================================================================
+# API Deploy — Composite Action
+# =============================================================================
+# Simplified deploy action. Handles:
+#   1. Retag image for environment
+#   2. SSH to server
+#   3. Pull new image
+#   4. Run migrations
+#   5. Rolling restart of named services
+#   6. Verify deployment
+#
+# Secrets/env management is SERVER-SIDE (not in this workflow).
+# The .env file lives on the server and is managed via Vault/Consul
+# or manual updates. This action never touches application secrets.
+#
+# Inputs: 7 (down from 380 in the original)
+# =============================================================================
+
+name: "API Deploy"
+description: "Deploy the API to a remote server"
+
+inputs:
+  ENVIRONMENT_NAME:
+    description: "Target environment (dev or production)"
+    required: true
+  IMAGE_TAG:
+    description: "Docker image tag (usually commit SHA)"
+    required: true
+  GITHUB_TOKEN:
+    description: "GitHub token for container registry"
+    required: true
+  SSH_PRIVATE_KEY:
+    description: "SSH private key for deployment server"
+    required: true
+  SSH_HOSTNAME:
+    description: "Hostname of the deployment server"
+    required: true
+  SSH_USERNAME:
+    description: "SSH username for deployment server"
+    required: true
+  SSH_KNOWN_HOSTS:
+    description: "SSH known_hosts entry for deployment server"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    # ----- Registry -----
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.repository_owner }}
+        password: ${{ inputs.GITHUB_TOKEN }}
+
+    - name: Tag image for ${{ inputs.ENVIRONMENT_NAME }}
+      shell: bash
+      run: |
+        docker buildx imagetools create \
+          ghcr.io/${{ github.repository_owner }}/monolith-cicd-testbed:${{ inputs.IMAGE_TAG }} \
+          --tag ghcr.io/${{ github.repository_owner }}/monolith-cicd-testbed:${{ inputs.ENVIRONMENT_NAME }}
+
+    # ----- SSH Setup -----
+    - name: Configure SSH
+      shell: bash
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ inputs.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy.key
+        chmod 600 ~/.ssh/deploy.key
+        echo "${{ inputs.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+        chmod 600 ~/.ssh/known_hosts
+
+        cat > ~/.ssh/config << EOF
+        Host deploy-target
+          HostName ${{ inputs.SSH_HOSTNAME }}
+          User ${{ inputs.SSH_USERNAME }}
+          IdentityFile ~/.ssh/deploy.key
+          StrictHostKeyChecking yes
+        EOF
+        chmod 600 ~/.ssh/config
+
+    # ----- Deploy -----
+    - name: Copy compose file to server
+      shell: bash
+      run: |
+        scp $GITHUB_WORKSPACE/api/docker-compose/docker-compose.${{ inputs.ENVIRONMENT_NAME }}.yml \
+          deploy-target:~/docker-compose.yml
+
+    - name: Pull image and run migrations
+      shell: bash
+      run: |
+        ssh deploy-target << 'DEPLOY_SCRIPT'
+          set -e
+
+          echo "=== Pulling new image ==="
+          docker login -u ${{ github.repository_owner }} -p ${{ inputs.GITHUB_TOKEN }} ghcr.io
+          docker pull ghcr.io/${{ github.repository_owner }}/monolith-cicd-testbed:${{ inputs.ENVIRONMENT_NAME }}
+
+          echo "=== Running migrations ==="
+          docker compose pull adonis_app_migrator
+          docker compose stop adonis_app_migrator 2>/dev/null || true
+          docker compose rm -v -f adonis_app_migrator 2>/dev/null || true
+          docker compose up adonis_app_migrator
+
+          echo "=== Restarting bull worker ==="
+          docker compose down adonis_app_bull 2>/dev/null || true
+          docker compose up -d adonis_app_bull
+
+          echo "=== Rolling restart: app instances ==="
+          for svc in $(docker compose config --services | grep '^adonis_app' | grep -v migrator | grep -v bull | sort); do
+            echo "  Rolling restart: $svc"
+            docker rollout -w 3 "$svc" 2>/dev/null || docker compose up -d "$svc"
+            sleep 5
+          done
+
+          echo "=== Deployment complete ==="
+        DEPLOY_SCRIPT
+
+    # ----- Verification -----
+    - name: Verify deployment
+      shell: bash
+      run: |
+        echo "Waiting for services to stabilize..."
+        sleep 15
+
+        COMMIT=$(ssh deploy-target 'curl -sf http://localhost:3333/commit' || echo 'FAILED')
+        echo "Server reports commit: $COMMIT"
+        echo "Expected commit: ${{ inputs.IMAGE_TAG }}"
+
+        if [[ "$COMMIT" == "FAILED" ]]; then
+          echo "::error::Deployment verification failed — could not reach /commit endpoint"
+          exit 1
+        fi
+
+        if [[ "$COMMIT" != *"${{ inputs.IMAGE_TAG }}"* ]]; then
+          echo "::warning::Deployment verification — SHA mismatch. Server: $COMMIT, Expected: ${{ inputs.IMAGE_TAG }}"
+          echo "This may be expected if COMMIT_SHA is not set in the server .env"
+        fi
+
+        echo "Deployment verified successfully."

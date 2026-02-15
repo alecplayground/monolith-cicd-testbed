@@ -1,0 +1,174 @@
+# =============================================================================
+# API CI — Unified Build, Test, and Deploy
+# =============================================================================
+# Replaces the three separate workflows (api-base-image, api-build, api-deploy)
+# with a single pipeline:
+#
+#   build → test → deploy-dev → deploy-production
+#
+# Key improvements:
+#   - No base image dependency (single multi-stage Dockerfile)
+#   - Tests gate deployment (no shipping without green tests)
+#   - No secrets in workflow (env managed server-side)
+#   - Simplified deploy action (8 inputs vs 380)
+#   - Built-in deployment verification
+#
+# Secrets required (set at repo level or per environment):
+#   - GITHUB_TOKEN        (automatic)
+#   - SSH_PRIVATE_KEY     (per environment)
+#   - SSH_HOSTNAME        (per environment)
+#   - SSH_USERNAME        (per environment)
+#   - HOST_KEY            (per environment, SSH known_hosts)
+# =============================================================================
+
+name: "API CI"
+run-name: "API CI — ${{ github.event_name == 'push' && 'Push' || 'PR' }} by ${{ github.actor }}"
+
+on:
+  push:
+    paths:
+      - "api/**"
+      - ".github/workflows/api-ci.yml"
+      - ".github/actions/api-deploy/**"
+    branches:
+      - main
+      - "*/pla*"
+  pull_request:
+    paths:
+      - "api/**"
+      - ".github/workflows/api-ci.yml"
+      - ".github/actions/api-deploy/**"
+  workflow_dispatch:
+    inputs:
+      deploy_env:
+        description: "Environment to deploy to"
+        required: false
+        type: choice
+        options:
+          - none
+          - dev
+          - production
+        default: none
+
+jobs:
+  # ===========================================================================
+  # Build — Build and push the Docker image
+  # ===========================================================================
+  build:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: build-${{ github.ref }}
+      cancel-in-progress: true
+    outputs:
+      image_tag: ${{ github.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            api/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./api
+          file: ./api/Dockerfile
+          target: production
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/monolith-cicd-testbed:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/monolith-cicd-testbed:latest
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/monolith-cicd-testbed:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/monolith-cicd-testbed:buildcache,mode=max
+
+  # ===========================================================================
+  # Test — Run tests against the built image
+  # ===========================================================================
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            api/
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run tests
+        working-directory: api
+        env:
+          BRANCH_TAG: ${{ github.sha }}
+        run: |
+          docker compose -f docker-compose.citest.yml up \
+            --exit-code-from adonis_app_test \
+            adonis_app_test
+
+  # ===========================================================================
+  # Deploy Dev — Auto-deploy to dev on main branch pushes
+  # ===========================================================================
+  deploy-dev:
+    if: >
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_env == 'dev')
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to dev
+        uses: ./.github/actions/api-deploy
+        with:
+          ENVIRONMENT_NAME: dev
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOSTNAME: ${{ secrets.SSH_HOSTNAME }}
+          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+          SSH_KNOWN_HOSTS: ${{ secrets.HOST_KEY }}
+
+  # ===========================================================================
+  # Deploy Production — Requires manual approval after dev succeeds
+  # ===========================================================================
+  deploy-production:
+    if: >
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_env == 'production')
+    needs: [build, test, deploy-dev]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to production
+        uses: ./.github/actions/api-deploy
+        with:
+          ENVIRONMENT_NAME: production
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOSTNAME: ${{ secrets.SSH_HOSTNAME }}
+          SSH_USERNAME: ${{ secrets.SSH_USERNAME }}
+          SSH_KNOWN_HOSTS: ${{ secrets.HOST_KEY }}

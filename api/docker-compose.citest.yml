@@ -1,0 +1,16 @@
+# CI Test Compose
+# Used by the api-ci.yml workflow to run tests against a built image.
+#
+# Usage:
+#   BRANCH_TAG=<sha> docker compose -f docker-compose.citest.yml up \
+#     --exit-code-from adonis_app_test adonis_app_test
+
+version: '3.8'
+
+services:
+  adonis_app_test:
+    image: ghcr.io/alecplayground/monolith-cicd-testbed:${BRANCH_TAG}
+    command: ['dumb-init', 'node', 'test.js']
+    environment:
+      - NODE_ENV=test
+      - COMMIT_SHA=test-sha
