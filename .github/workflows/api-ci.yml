@@ -50,6 +50,10 @@ on:
           - production
         default: none
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   # ===========================================================================
   # Build — Build and push the Docker image
