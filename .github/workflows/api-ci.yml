@@ -97,7 +97,7 @@ jobs:
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/monolith-cicd-testbed:buildcache,mode=max
 
   # ===========================================================================
-  # Test — Run tests against the built image
+  # Test — Build test image and run tests
   # ===========================================================================
   test:
     needs: build
@@ -109,19 +109,11 @@ jobs:
           sparse-checkout: |
             api/
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Run tests
         working-directory: api
-        env:
-          BRANCH_TAG: ${{ github.sha }}
         run: |
           docker compose -f docker-compose.citest.yml up \
+            --build \
             --exit-code-from adonis_app_test \
             adonis_app_test
 
